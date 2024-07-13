@@ -11,12 +11,13 @@
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/in.h>
-#include <arpa/inet.h>
 #include <linux/if_packet.h>
 #include <linux/if_ether.h>
 #include <linux/filter.h>
 
+#include "autoconf.h"
 #include "arppy.h"
+
 
 struct sock_filter arp_filter[] = {
     { 0x28, 0, 0, 0x0000000c }, // ldh [12]

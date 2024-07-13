@@ -1,0 +1,35 @@
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
+
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+
+# Executables
+*.exe
+*.out
+src/arppy
+
+# Generated files
+Makefile
+autom4te.cache/
+config.log
+config.status
+include/autoconf.h
+.deps
+
+*~
