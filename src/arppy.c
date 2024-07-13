@@ -6,6 +6,7 @@
 #include <argp.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <net/ethernet.h>
@@ -17,6 +18,8 @@
 
 #include "autoconf.h"
 #include "arppy.h"
+
+#define IPTOKEN ",;"
 
 
 struct sock_filter arp_filter[] = {
@@ -74,24 +77,41 @@ static struct argp argp = { options, parse_opt, arg_doc, doc };
 struct arguments arguments;
 
 int main(int argc, char **argv) {
-    int len, sock, expected, offset;
-    uint8_t *raw;
-    arp_packet *arp;
-    frame_hdr *frame;
-    struct sockaddr_ll addr;
+    int sock;
     char srcip[32], srcmac[32], dstip[32], dstmac[32];
-    char *ifname = 0;
+    unsigned long *checkips = NULL;
+    unsigned int ipcount = 0;
     unsigned int ifindex = 0;
+    uint8_t ifmac[6];
 
     arguments.verbose = 0;
     arguments.config = 0;
     
     argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
-    printf("INTERFACE=%s, IPS=%s\n", arguments.args[0], arguments.args[1]);
+    // Parse the IP addresses
+    char *token = strtok(arguments.args[1], IPTOKEN);
+    while (token != NULL) {
+        struct in_addr addr;
+        if (inet_pton(AF_INET, token, &addr) != 1) {
+            fprintf(stderr, "cannot parse ip address: %s\n", token);
+            exit(EXIT_FAILURE);
+        }
 
-    raw = malloc(sizeof(uint8_t) * IP_MAXPACKET);
-    memset(raw, 0, sizeof(uint8_t) * IP_MAXPACKET);
+        if (checkips == NULL) {
+            checkips = malloc(sizeof(unsigned long));
+            ipcount = 1;
+        } else {
+            unsigned long *iptemp = malloc(sizeof(unsigned long) * (ipcount + 1));
+            memmove(iptemp, checkips, sizeof(unsigned long) * ipcount);
+            free(checkips);
+            checkips = iptemp;
+            ipcount++;
+        }
+        printf("Parsed %x\n", addr.s_addr);
+        checkips[ipcount - 1] = addr.s_addr;
+        token = strtok(NULL, IPTOKEN);
+    }
 
     // Create a raw socket
     if ((sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ARP))) < 0) {
@@ -106,29 +126,33 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    // TODO: Convert IP's to array of addrins
-    // count ,'s in array to get count
-    // malloc array of unsigned longs count of , + 1
-    // strtok loop
-    // inet_pton, AF_INET, in_addr
-    // access in_addr.s_addr as unsigned long and store
-
     // Bind to the interface
-    memset(&addr, 0, sizeof(addr));
-    addr.sll_ifindex = if_nametoindex(arguments.args[0]);
-    addr.sll_family = AF_PACKET;
-    addr.sll_protocol = htons(ETH_P_ALL);
+    struct sockaddr_ll bindaddr;    
+    memset(&bindaddr, 0, sizeof(bindaddr));
+    bindaddr.sll_ifindex = if_nametoindex(arguments.args[0]);
+    bindaddr.sll_family = AF_PACKET;
+    bindaddr.sll_protocol = htons(ETH_P_ALL);
 
-    if (bind(sock, (struct sockaddr *) &addr, sizeof(addr))) {
+    if (bind(sock, (struct sockaddr *) &bindaddr, sizeof(bindaddr))) {
         perror("failed to bind to interface");
         close(sock);
         exit(EXIT_FAILURE);
     }
 
-    // TODO: Get ineterface mac address
-    // struct ifreq, ifr_name = ifname
-    // ioctl(sock, SIOCGIFHWADDR, &ifreq
-    // s.ifr_addr.sa_data, store 6 bytes for re-use
+    // Get our interface MAC for later use
+    struct ifreq req;
+    strcpy(req.ifr_name, arguments.args[0]);
+    if (ioctl(sock, SIOCGIFHWADDR, &req) < 0) {
+        perror("could not get hardware address");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < 6; i++) {
+        ifmac[i] = req.ifr_addr.sa_data[i];
+    }
+
+    if (arguments.verbose)
+        printf("%s MAC: %s\n", arguments.args[0], print_mac(ifmac, dstmac, sizeof(dstmac)));
 
     // Create a BPF for only ARP packets
     struct sock_fprog bpf = {
@@ -143,11 +167,16 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    // Allocate our raw packet
+    uint8_t *raw = malloc(sizeof(uint8_t) * IP_MAXPACKET);
+    memset(raw, 0, sizeof(uint8_t) * IP_MAXPACKET);
+
     // Pre-calculate some things for efficiency
-    expected = sizeof(arp_packet) + sizeof(frame_hdr);
-    offset = sizeof(frame_hdr);
+    int expected = sizeof(arp_packet) + sizeof(frame_hdr);
+    int offset = sizeof(frame_hdr);
 
     // Keep looping on each packet until there's an error
+    int len = 0;
     while ((len =  recv(sock, raw, IP_MAXPACKET, 0)) != -1) {
 
         // Sanity check and shortcut out
@@ -155,8 +184,8 @@ int main(int argc, char **argv) {
             continue;
         
         // Find the payload parts
-        frame = (frame_hdr *) raw;
-        arp = (arp_packet *) (raw + sizeof(frame_hdr));
+        frame_hdr *frame = (frame_hdr *) raw;
+        arp_packet *arp = (arp_packet *) (raw + sizeof(frame_hdr));
 
         // Check for the frame type to ensure it's ARP
         if (ntohs(frame->type) != ETHERTYPE_ARP) {
@@ -166,28 +195,43 @@ int main(int argc, char **argv) {
 
         // If it's a request, we need to validate that it's in our list of IP's to generate a reply
         if (ntohs(arp->op) == ARP_REQ) {
-            printf("Request: Who has %s (%s),",
-                print_ip(arp->target_ip, dstip, sizeof(dstip)), 
-                print_mac(arp->target_mac, dstmac, sizeof(dstmac)));
-            printf(" tell %s (%s)\n", 
-                print_ip(arp->sender_ip, srcip, sizeof(srcip)),
-                print_mac(arp->sender_mac, srcmac, sizeof(srcmac)));
-            // TODO: Check incoming target_ip vs list of ip's
-            // TODO: Generate a reply with the if's mac and the sender's info
-            // TODO: ethernet frame, with arp reply inside, call send
+            if (arguments.verbose) {
+                printf("Request: Who has %s (%s),",
+                    print_ip(arp->target_ip, dstip, sizeof(dstip)), 
+                    print_mac(arp->target_mac, dstmac, sizeof(dstmac)));
+                printf(" tell %s (%s)\n", 
+                    print_ip(arp->sender_ip, srcip, sizeof(srcip)),
+                    print_mac(arp->sender_mac, srcmac, sizeof(srcmac)));
+            }
+            // Convert target IP into an unsigned long
+            unsigned long targetip = arp->target_ip[0] | arp->target_ip[1] << 8 | arp->target_ip[2] << 16 | arp->target_ip[3] << 24;
+            for (int i = 0; i < ipcount; i++) {
+                if (targetip == checkips[i]) {
+                    if (arguments.verbose) {
+                        printf("Match\n");
+                        // TODO: ethernet frame, with arp reply inside, call send
+                    }
+                    break;
+                }
+            }
+
+            
         } else {
             // TODO: Don't do much with replies
-            printf("Reply: Tell %s (%s),", 
-                print_ip(arp->target_ip, dstip, sizeof(dstip)), 
-                print_mac(arp->target_mac, dstmac, sizeof(dstmac)));
-            printf(" %s is at %s\n",
-                print_ip(arp->sender_ip, srcip, sizeof(srcip)),
-                print_mac(arp->sender_mac, srcmac, sizeof(srcmac)));
+            if (arguments.verbose) {
+                printf("Reply: Tell %s (%s),", 
+                    print_ip(arp->target_ip, dstip, sizeof(dstip)), 
+                    print_mac(arp->target_mac, dstmac, sizeof(dstmac)));
+                printf(" %s is at %s\n",
+                    print_ip(arp->sender_ip, srcip, sizeof(srcip)),
+                    print_mac(arp->sender_mac, srcmac, sizeof(srcmac)));
+            }
         }
     }
 
     close(sock);
-    free(frame);
+    free(raw);
+    free(checkips);
 
     return EXIT_SUCCESS;
 }
@@ -201,7 +245,7 @@ const char * print_ip(uint8_t ip[4], char *buffer, int length) {
 }
 
 const char * print_mac(uint8_t mac[6], char *buffer, int length) {
-    // xx.xx.xx.xx.xx.xx
+    // xxxx.xxxx.xxxx
     memset(buffer, 0, length);
 
     snprintf(buffer, length - 1, "%02x%02x.%02x%02x.%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
