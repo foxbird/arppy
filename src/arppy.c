@@ -37,7 +37,7 @@ static char arg_doc[] = "INTERFACE IPS";
 static struct argp_option options[] = {
     {"verbose",     'v',    0,              0,  "Verbose output (specify multiple times for more verbosity)"},
     {"config",      'c',    "FILE",         0,  "Configuration file"},
-    {"mac",         'm',    "MACADDRSS",    0,  "MAC to send (aaaa.aaaa.aaaa)"},
+    {"mac",         'm',    "MACADDRSS",    0,  "MAC to send (eeee.eeee.eeee)"},
     {"dry-run",     'd',    0,              0,  "Do not send arp replies"},
     { 0 }
 };
@@ -277,11 +277,11 @@ void create_arp_reply(
 
     // Set the other attributes
     hdr->type = htons(ETHERTYPE_ARP);
-    arp->htype = ARP_HTYPE_ETHERNET;
-    arp->ptype = ARP_PTYPE_IP;
+    arp->htype = htons(ARP_HTYPE_ETHERNET);
+    arp->ptype = htons(ARP_PTYPE_IP);
     arp->hlen = ETHER_ADDR_LEN;
     arp->plen = sizeof(in_addr_t);
-    arp->op = ARP_REP;
+    arp->op = htons(ARP_REP);
 
     // Copy in the MAC addresses
     for (int i = 0; i < MAC_BYTE_LENGTH; i++) {
@@ -293,7 +293,7 @@ void create_arp_reply(
 
     // Copy in the IP addresses
     for (int i = 0; i < IP_BYTE_LENGTH; i++) {
-        arp->src_ip[i] = dstip[i];
+        arp->src_ip[i] = srcip[i];
         arp->dst_ip[i] = dstip[i];
     }
 }
@@ -366,13 +366,13 @@ int main(int argc, char **argv) {
 
         // If it's a request, we need to validate that it's in our list of IP's to generate a reply
         if (ntohs(arp_request->op) == ARP_REQ) {
-            if (arguments.verbose)
+            if (arguments.verbose >= VERBOSITY_HIGH)
                 print_arp_request(arp_request);
 
             if (check_ip_handled(arp_request->dst_ip, arguments.handleips, arguments.handle_ip_count)) {
                 static uint8_t reply[sizeof(frame_hdr) + sizeof(arp_packet)];
                 create_arp_reply(arguments.mac, arp_request->dst_ip, arp_request->src_mac, arp_request->src_ip, reply);
-                if (arguments.verbose) { 
+                if (arguments.verbose >= VERBOSITY_HIGH) { 
                     printf("Send ");
                     print_arp_reply((arp_packet*) (reply + sizeof(frame_hdr)));
                 }
@@ -386,7 +386,7 @@ int main(int argc, char **argv) {
             }
             
         } else {
-            if (arguments.verbose == VERBOSITY_HIGH) 
+            if (arguments.verbose >= VERBOSITY_VERYHIGH) 
                 print_arp_reply(arp_request);
         }
     }
