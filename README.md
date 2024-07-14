@@ -32,8 +32,8 @@ What does a setup like this look like? Well, something like this:
                                192.168.100.0/24         192.168.100.0/24
                                    .1     ??             .1     .2-.254
 [ISP Network] --- [ISP Device/Router] --- [Gateway (Arppy)] --- [Devices]
-           .1     .2        .1     .2
-         172.16.0.0/16  192.168.250.0/24
+           .1     .2               .1     .2
+         172.16.0.0/16         192.168.250.0/24
 ```
 
 In this case, let's assume that the ISP has granted you a block of public routed
